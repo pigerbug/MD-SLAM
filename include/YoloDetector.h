@@ -24,6 +24,7 @@
 #include <vector>
 #include <set>
 #include "NvInferRuntime.h"
+#include <cuda_runtime.h>
 
 #include <cv.h>
 #include <opencv2/features2d/features2d.hpp>
@@ -90,14 +91,14 @@ public:
     YoloDetector();
     void DetectByTensorRT(cv::Mat& image, cv::Mat& depth, std::vector<YoloBoundingBox>& yoloBoundingBoxList);
 
+    ~YoloDetector();
+
     void SetTracker(Tracking* pTracker);
 
     bool isNewImgArrived();
     void Run();
     bool CheckFinish();
     void RequestFinish();
-
-    void doInference(IExecutionContext& context, cudaStream_t& stream, void **buffers, float* output, int batchSize);
 
     std::mutex mMutexNewYoloDetector;
     std::mutex mMutexGetNewImg;
@@ -109,10 +110,16 @@ public:
     cv::Mat mDepth;
     bool mbTensorRT;
     bool mbYOLO;
-    
-//    torch::jit::script::Module mModule;
-
     IExecutionContext* context;
+    ICudaEngine* engine;
+    cudaStream_t stream;
+    void* buffers[2];
+    int inputIndex;
+    int outputIndex;
+    int inputHeight;
+    int inputWidth;
+    size_t inputSize;
+    size_t outputSize;
 };
 
 }

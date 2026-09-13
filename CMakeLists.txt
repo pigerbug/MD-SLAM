@@ -20,7 +20,9 @@ if (NOT OpenCV_FOUND)
     endif ()
 endif ()
 include_directories(/home/nan/catkin_ws/src/third_paities/TensorRT-8.2.1.8.Linux.x86_64-gnu.cuda-11.4.cudnn8.2/TensorRT-8.2.1.8/include)
+include_directories(/usr/local/cuda/include)
 link_directories(/home/nan/catkin_ws/src/third_paities/TensorRT-8.2.1.8.Linux.x86_64-gnu.cuda-11.4.cudnn8.2/TensorRT-8.2.1.8/lib)
+link_directories(/usr/local/cuda/lib64)
 find_package(Eigen3 3.1.0 REQUIRED)
 find_package(PCL 1.12 REQUIRED COMPONENTS common sample_consensus segmentation filters)
 find_package(Pangolin REQUIRED)
@@ -110,7 +112,8 @@ target_link_libraries(${PROJECT_NAME}
         ${PROJECT_SOURCE_DIR}/Thirdparty/g2o/lib/libg2o.so
         ${PCL_LIBRARIES}
         ${tinyply_LIBRARY_DIR}/libtinyply.so
-        ${PROJECT_SOURCE_DIR}/Thirdparty/yolov5_tensorrtx/lib/libyolov5.so
+        nvinfer
+        cudart
         )
 
 # Build examples

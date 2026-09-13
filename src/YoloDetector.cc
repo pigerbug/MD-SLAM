@@ -2,15 +2,266 @@
 #include "YoloDetector.h"
 #include "Tracking.h"
 #include <iostream>
-#include <chrono>
-#include <cmath>
-#include "Thirdparty/yolov5_tensorrtx/cuda_utils.h"
-#include "Thirdparty/yolov5_tensorrtx/logging.h"
-#include "Thirdparty/yolov5_tensorrtx/utils.h"
-#include "Thirdparty/yolov5_tensorrtx/common.hpp"
-#include "Thirdparty/yolov5_tensorrtx/calibrator.h"
-#include "Thirdparty/yolov5_tensorrtx/preprocess.h"
+#include <stdexcept>
+#include <vector>
 
+#define CONF_THRESH 0.5f
+#define NMS_THRESH 0.45f
+#define ENGINE_PATH "model/yolov8x.engine"
+
+namespace
+{
+class TrtLogger : public nvinfer1::ILogger
+{
+public:
+    void log(Severity severity, const char* message) noexcept override
+    {
+        if (severity <= Severity::kWARNING)
+            std::cerr << "[TensorRT] " << message << std::endl;
+    }
+};
+
+TrtLogger gLogger;
+
+size_t tensorVolume(const nvinfer1::Dims& dims)
+{
+    size_t volume = 1;
+    for (int i = 0; i < dims.nbDims; ++i)
+        volume *= static_cast<size_t>(dims.d[i]);
+    return volume;
+}
+float intersectionOverUnion(const cv::Rect2f& first, const cv::Rect2f& second)
+{
+    const float intersection = (first & second).area();
+    const float combined = first.area() + second.area() - intersection;
+    return combined > 0.0f ? intersection / combined : 0.0f;
+}
+}
+
+namespace ORB_SLAM2
+{
+
+YoloDetector::YoloDetector()
+    : cpuThreadNum(1), mbNewImgFlag(false), mbFinishRequested(false), mpTracker(NULL),
+      mbTensorRT(true), mbYOLO(false), context(NULL), engine(NULL), stream(NULL),
+      buffers{NULL, NULL}, inputIndex(-1), outputIndex(-1), inputHeight(640),
+      inputWidth(640), inputSize(0), outputSize(0)
+{
+    std::ifstream namesFile("model/coco.names");
+    std::string name;
+    while (std::getline(namesFile, name))
+        class_names.push_back(name);
+
+    std::ifstream engineFile(ENGINE_PATH, std::ios::binary);
+    if (!engineFile)
+        throw std::runtime_error("Unable to open YOLOv8 engine: " ENGINE_PATH);
+    engineFile.seekg(0, std::ios::end);
+    const size_t engineSize = static_cast<size_t>(engineFile.tellg());
+    engineFile.seekg(0, std::ios::beg);
+    std::vector<char> serialized(engineSize);
+    engineFile.read(serialized.data(), static_cast<std::streamsize>(engineSize));
+
+    nvinfer1::IRuntime* runtime = nvinfer1::createInferRuntime(gLogger);
+    if (!runtime)
+        throw std::runtime_error("Unable to create TensorRT runtime");
+    engine = runtime->deserializeCudaEngine(serialized.data(), engineSize);
+    runtime->destroy();
+    if (!engine || engine->getNbBindings() != 2)
+        throw std::runtime_error("YOLOv8 engine must have one input and one output binding");
+    context = engine->createExecutionContext();
+    if (!context)
+        throw std::runtime_error("Unable to create YOLOv8 execution context");
+
+    for (int binding = 0; binding < engine->getNbBindings(); ++binding)
+    {
+        if (engine->bindingIsInput(binding))
+            inputIndex = binding;
+        else
+            outputIndex = binding;
+    }
+    const nvinfer1::Dims inputDims = engine->getBindingDimensions(inputIndex);
+    const nvinfer1::Dims outputDims = engine->getBindingDimensions(outputIndex);
+    if (inputDims.nbDims != 3 || outputDims.nbDims != 3 || inputDims.d[0] != 3)
+        throw std::runtime_error("YOLOv8 engine must use CHW input and 3D output");
+    inputHeight = inputDims.d[1];
+    inputWidth = inputDims.d[2];
+    inputSize = tensorVolume(inputDims);
+    outputSize = tensorVolume(outputDims);
+    if (outputDims.d[1] < 5 && outputDims.d[2] < 5)
+        throw std::runtime_error("Invalid YOLOv8 output shape");
+
+    if (cudaMalloc(&buffers[inputIndex], inputSize * sizeof(float)) != cudaSuccess ||
+        cudaMalloc(&buffers[outputIndex], outputSize * sizeof(float)) != cudaSuccess ||
+        cudaStreamCreate(&stream) != cudaSuccess)
+        throw std::runtime_error("Unable to allocate YOLOv8 CUDA buffers");
+    std::cout << "Loaded YOLOv8 TensorRT engine: " << ENGINE_PATH << std::endl;
+}
+
+YoloDetector::~YoloDetector()
+{
+    if (stream)
+        cudaStreamDestroy(stream);
+    if (buffers[inputIndex])
+        cudaFree(buffers[inputIndex]);
+    if (buffers[outputIndex])
+        cudaFree(buffers[outputIndex]);
+    if (context)
+        context->destroy();
+    if (engine)
+        engine->destroy();
+}
+
+void YoloDetector::DetectByTensorRT(cv::Mat& image, cv::Mat&, std::vector<YoloBoundingBox>& boxes)
+{
+    if (image.empty())
+        return;
+
+    cv::Mat rgb;
+    if (image.channels() == 1)
+        cv::cvtColor(image, rgb, cv::COLOR_GRAY2RGB);
+    else if (image.channels() == 4)
+        cv::cvtColor(image, rgb, cv::COLOR_BGRA2RGB);
+    else
+        cv::cvtColor(image, rgb, cv::COLOR_BGR2RGB);
+
+    const float scale = std::min(inputWidth / static_cast<float>(rgb.cols),
+                                 inputHeight / static_cast<float>(rgb.rows));
+    const int resizedWidth = static_cast<int>(std::round(rgb.cols * scale));
+    const int resizedHeight = static_cast<int>(std::round(rgb.rows * scale));
+    const int padX = (inputWidth - resizedWidth) / 2;
+    const int padY = (inputHeight - resizedHeight) / 2;
+    cv::Mat resized, letterbox(inputHeight, inputWidth, CV_8UC3, cv::Scalar(114, 114, 114));
+    cv::resize(rgb, resized, cv::Size(resizedWidth, resizedHeight));
+    resized.copyTo(letterbox(cv::Rect(padX, padY, resizedWidth, resizedHeight)));
+
+    std::vector<float> input(inputSize);
+    for (int y = 0; y < inputHeight; ++y)
+        for (int x = 0; x < inputWidth; ++x)
+            for (int channel = 0; channel < 3; ++channel)
+                input[channel * inputHeight * inputWidth + y * inputWidth + x] =
+                    letterbox.at<cv::Vec3b>(y, x)[channel] / 255.0f;
+
+    std::vector<float> output(outputSize);
+    cudaMemcpyAsync(buffers[inputIndex], input.data(), inputSize * sizeof(float),
+                    cudaMemcpyHostToDevice, stream);
+    if (!context->enqueueV2(buffers, stream, NULL))
+        throw std::runtime_error("YOLOv8 TensorRT enqueue failed");
+    cudaMemcpyAsync(output.data(), buffers[outputIndex], outputSize * sizeof(float),
+                    cudaMemcpyDeviceToHost, stream);
+    cudaStreamSynchronize(stream);
+
+    const nvinfer1::Dims outputDims = engine->getBindingDimensions(outputIndex);
+    const int first = outputDims.d[1];
+    const int second = outputDims.d[2];
+    const bool channelFirst = first < second;
+    const int attributes = channelFirst ? first : second;
+    const int candidateCount = channelFirst ? second : first;
+    const int classCount = attributes - 4;
+    const float inverseScale = 1.0f / scale;
+    auto valueAt = [&](int candidate, int attribute) {
+        return channelFirst ? output[attribute * candidateCount + candidate]
+                            : output[candidate * attributes + attribute];
+    };
+
+    std::vector<YoloBoundingBox> candidates;
+    for (int candidate = 0; candidate < candidateCount; ++candidate)
+    {
+        int classId = 0;
+        float score = 0.0f;
+        for (int currentClass = 0; currentClass < classCount; ++currentClass)
+        {
+            if (valueAt(candidate, currentClass + 4) > score)
+            {
+                score = valueAt(candidate, currentClass + 4);
+                classId = currentClass;
+            }
+        }
+        if (score < CONF_THRESH || classId >= static_cast<int>(class_names.size()))
+            continue;
+        const float centerX = (valueAt(candidate, 0) - padX) * inverseScale;
+        const float centerY = (valueAt(candidate, 1) - padY) * inverseScale;
+        const float width = valueAt(candidate, 2) * inverseScale;
+        const float height = valueAt(candidate, 3) * inverseScale;
+        cv::Rect2f rect(centerX - width / 2.0f, centerY - height / 2.0f, width, height);
+        rect &= cv::Rect2f(0, 0, static_cast<float>(image.cols), static_cast<float>(image.rows));
+        candidates.emplace_back(rect, class_names[classId], score);
+    }
+
+    std::sort(candidates.begin(), candidates.end(), [](const YoloBoundingBox& firstBox,
+                                                        const YoloBoundingBox& secondBox) {
+        return firstBox.GetScore() > secondBox.GetScore();
+    });
+    for (const YoloBoundingBox& candidate : candidates)
+    {
+        bool suppressed = false;
+        for (const YoloBoundingBox& selected : boxes)
+            if (candidate.GetLabel() == selected.GetLabel() &&
+                intersectionOverUnion(candidate.GetRect(), selected.GetRect()) > NMS_THRESH)
+                suppressed = true;
+        if (!suppressed)
+        {
+            if (candidate.GetLabel() == "person" && mpTracker)
+                mpTracker->mvDynamicArea.push_back(candidate.GetRect());
+            boxes.push_back(candidate);
+        }
+    }
+}
+
+void YoloDetector::Run()
+{
+    while (true)
+    {
+        usleep(1);
+        if (!isNewImgArrived())
+            continue;
+        if (mImg.channels() == 1)
+            cv::cvtColor(mImg, mImg, cv::COLOR_GRAY2RGB);
+        std::unique_lock<std::mutex> resultLock(mMutexNewYoloDetector);
+        mpTracker->yoloBoundingBoxList.clear();
+        mpTracker->mvDynamicArea.clear();
+        if (mbYOLO)
+            DetectByTensorRT(mImg, mDepth, mpTracker->yoloBoundingBoxList);
+        mpTracker->mbNewSegImgFlag = true;
+        if (CheckFinish())
+            break;
+    }
+}
+
+void YoloDetector::SetTracker(Tracking* tracker) { mpTracker = tracker; }
+
+bool YoloDetector::isNewImgArrived()
+{
+    std::unique_lock<std::mutex> lock(mMutexGetNewImg);
+    if (!mbNewImgFlag)
+        return false;
+    mbNewImgFlag = false;
+    return true;
+}
+
+YoloBoundingBox::YoloBoundingBox(cv::Rect2f inputRect, std::string inputLabel, float inputScore)
+    : rect(inputRect), label(inputLabel), id(0), score(inputScore),
+      width(inputRect.width), height(inputRect.height) {}
+
+YoloBoundingBox::YoloBoundingBox(float x1, float y1, float x2, float y2,
+                                 std::string inputLabel, float inputScore)
+    : rect(x1, y1, x2 - x1, y2 - y1), label(inputLabel), id(0), score(inputScore),
+      width(x2 - x1), height(y2 - y1) {}
+
+bool YoloDetector::CheckFinish()
+{
+    std::unique_lock<std::mutex> lock(mMutexFinish);
+    return mbFinishRequested;
+}
+
+void YoloDetector::RequestFinish()
+{
+    std::unique_lock<std::mutex> lock(mMutexFinish);
+    mbFinishRequested = true;
+}
+
+}
+
+#if 0
 #define USE_FP16  // set USE_INT8 or USE_FP16 or USE_FP32
 #define DEVICE 0  // GPU id
 #define NMS_THRESH 0.4
@@ -495,3 +746,4 @@ void YoloDetector::doInference(IExecutionContext& context, cudaStream_t& stream,
 }
 
 }
+#endif
