@@ -1,97 +1,160 @@
-# ManhattanSLAM in dynamic
+# ManhattanSLAM with YOLOv8 TensorRT
 
-**Authors:** Raza Yunus, Yanyan Li and Federico Tombari
+ManhattanSLAM is a real-time RGB-D SLAM system built on ORB-SLAM2 and extended with planar constraints, dense surfel reconstruction, and dynamic-object filtering using a YOLOv8 TensorRT detector.
 
-ManhattanSLAM is a real-time SLAM library for **RGB-D** cameras that computes the camera pose trajectory, a sparse 3D
-reconstruction (containing point, line and plane features) and a dense surfel-based 3D reconstruction. Further details
-can be found in the related publication. The code is based on [ORB-SLAM2](https://github.com/raulmur/ORB_SLAM2).
+This repository keeps the original ManhattanSLAM mapping and tracking pipeline, while replacing the legacy YOLOv5 TensorRT integration with a modern YOLOv8 inference path. The detector is used to generate dynamic object masks and suppress moving regions during tracking and mapping.
 
-<a href="https://www.youtube.com/embed/UE8A6mUOPLE" target="_blank"><img
-src="https://img.youtube.com/vi/UE8A6mUOPLE/0.jpg"
-alt="ManhattanSLAM" width="240" height="180" border="10" /></a>
+## Features
 
-### Related Publication:
+- RGB-D SLAM with ORB features, line features, plane features, and Manhattan-frame constraints
+- Dense surfel-based 3D reconstruction
+- Dynamic object detection using YOLOv8
+- TensorRT deployment for low-latency inference
+- Support for dynamic region masking in tracking
+- Example configs for TUM, ICL, and TAMU datasets
 
-Raza Yunus, Yanyan Li and Federico Tombari, **ManhattanSLAM: Robust Planar Tracking and Mapping Leveraging Mixture of
-Manhattan Frames**, *in 2021 IEEE International Conference on Robotics and Automation (ICRA)
-.* **[PDF](https://arxiv.org/pdf/2103.15068.pdf)**.
+## Related Publication
 
-# 1. License
+Raza Yunus, Yanyan Li, and Federico Tombari. "ManhattanSLAM: Robust Planar Tracking and Mapping Leveraging Mixture of Manhattan Frames." ICRA 2021.
 
-ManhattanSLAM is released under
-a [GPLv3 license](https://github.com/razayunus/ManhattanSLAM/blob/master/License-gpl.txt). For a list of all
-code/library dependencies (and associated licenses), please
-see [Dependencies.md](https://github.com/razayunus/ManhattanSLAM/blob/master/Dependencies.md).
+Paper: https://arxiv.org/pdf/2103.15068.pdf
 
-If you use ManhattanSLAM in an academic work, please cite:
+## License
 
+This project is released under the GPLv3 license.
+
+See:
+- LICENSE.txt
+- License-gpl.txt
+- Dependencies.md
+
+If you use this project in academic work, please cite the original paper listed above.
+
+## Prerequisites
+
+The project was originally developed and tested under Ubuntu 16.04 / 20.04 environments. A typical modern build environment is:
+
+- Ubuntu 18.04 or 20.04
+- CUDA 11.x
+- TensorRT 8.x
+- OpenCV 3.x or 4.x
+- Eigen3
+- PCL 1.7+ / 1.10+
+- Pangolin
+- tinyply
+- CMake
+- GCC / g++ with C++14 support
+
+The exact include and link paths in the top-level CMakeLists.txt may need to be adjusted to your local CUDA/TensorRT installation.
+
+## Repository Layout
+
+- `include/` : core SLAM headers
+- `src/` : SLAM implementations
+- `Thirdparty/` : DBoW2, g2o and external dependencies
+- `Example/` : dataset config and example runner
+- `Vocabulary/` : ORB vocabulary files
+- `model/` : expected YOLOv8 engine and class list
+- `build.sh` : project build script
+
+## Build
+
+Clone the project:
+
+```bash
+git clone <your-repo-url>
+cd MD-SLAM
 ```
-@inproceedings{yunus2021manhattanslam,
-    author = {R. Yunus, Y. Li and F. Tombari},
-    title = {ManhattanSLAM: Robust Planar Tracking and Mapping Leveraging Mixture of Manhattan Frames},
-    year = {2021},
-    booktitle = {2021 IEEE international conference on Robotics and automation (ICRA)},
-}
-```
 
-# 2. Prerequisites
+Build the dependencies and project:
 
-We have tested the library in **Ubuntu 16.04** and **Ubuntu 20.04**, but it should be easy to compile on other platforms. A powerful
-computer (e.g. i7) will ensure real-time performance and provide more stable and accurate results. Following is the list
-of dependecies for ManhattanSLAM and their versions tested by us:
-
-- **OpenCV:** 3.3.0, 3.4.3
-- **PCL:** 1.7.2, 1.10
-- **Eigen3:** 3.3
-- **DBoW2:** Included in Thirdparty folder
-- **g2o:** Included in Thirdparty folder
-- **Pangolin**
-- **tinyply:** 2.3.2
-
-# 3. Building and testing
-
-Clone the repository:
-
-```
-git clone https://github.com/razayunus/ManhattanSLAM
-```
-
-There is a script `build.sh` to build the *Thirdparty* libraries and *ManhattanSLAM*. Please make sure you have
-installed all required dependencies (see section 2). Execute:
-
-```
-cd ManhattanSLAM
+```bash
 chmod +x build.sh
 ./build.sh
 ```
 
-This will create **libManhattanSLAM.so** in *lib* folder and the executable **manhattan_slam** in *Example* folder.
+If your environment does not use the default CUDA/TensorRT locations, edit the relevant include and link directories in `CMakeLists.txt` before building.
 
-To test the system:
+## YOLOv8 TensorRT Setup
 
-1. Download a sequence for one of the following datasets and uncompress it:
-    - **TUM RGB-D: https://vision.in.tum.de/data/datasets/rgbd-dataset**
-    - **ICL-NUIM: https://www.doc.ic.ac.uk/~ahanda/VaFRIC/iclnuim.html**
-    - **TAMU RGB-D: http://telerobot.cs.tamu.edu/MFG/rgbd/livo/data.html**
+The detector now expects a YOLOv8 TensorRT engine named:
 
-2. Associate RGB images and depth images using the python
-   script [associate.py](http://vision.in.tum.de/data/datasets/rgbd-dataset/tools). You can generate an associations
-   file by executing:
-
-  ```
-  python associate.py PATH_TO_SEQUENCE/rgb.txt PATH_TO_SEQUENCE/depth.txt > associations.txt
-  ```
-
-**Note:** For ICL-NUIM sequences, the association files are already given but the association is defined as ``depth > rgb`` rather than ``rgb > depth``. This can be changed by transforming ``associations.txt`` as:
-```
-cat associations.txt | sed 's/depth/temp/g;s/rgb/depth/g;s/temp/rgb/g' | tee associations.txt > /dev/null
+```text
+model/yolov8x.engine
 ```
 
-3. Execute the following command. Change `Config.yaml` to ICL.yaml for ICL-NUIM sequences, TAMU.yaml for TAMU RGB-D
-   sequences or TUM1.yaml, TUM2.yaml or TUM3.yaml for freiburg1, freiburg2 and freiburg3 sequences of TUM RGB-D
-   respectively. Change `PATH_TO_SEQUENCE_FOLDER`to the uncompressed sequence folder. Change `ASSOCIATIONS_FILE` to the
-   path to the corresponding associations file.
+and a class list file:
 
-  ```
-  ./Example/manhattan_slam Vocabulary/ORBvoc.txt Example/Config.yaml PATH_TO_SEQUENCE_FOLDER ASSOCIATIONS_FILE
-  ```
+```text
+model/coco.names
+```
+
+### Export a YOLOv8 engine
+
+Use the same TensorRT version as the project build environment:
+
+```bash
+pip install ultralytics
+
+yolo export model=yolov8x.pt format=engine imgsz=640 half=True device=0
+mkdir -p model
+cp yolov8x.engine model/yolov8x.engine
+cp coco.names model/coco.names
+```
+
+Important:
+- Old YOLOv5 engine files are not compatible with the current detector.
+- The engine must be generated from a YOLOv8 model.
+- If you use a custom class set, make sure the class ordering matches the training labels.
+
+A more detailed note is available in `YOLOv8_TensorRT.md`.
+
+## Run the SLAM System
+
+Prepare a dataset sequence and a corresponding association file.
+
+For TUM RGB-D:
+
+```bash
+python associate.py PATH_TO_SEQUENCE/rgb.txt PATH_TO_SEQUENCE/depth.txt > associations.txt
+```
+
+Then run:
+
+```bash
+./Example/manhattan_slam Vocabulary/ORBvoc.txt Example/TUM1.yaml PATH_TO_SEQUENCE_FOLDER associations.txt
+```
+
+Replace the config file according to the dataset:
+
+- `Example/TUM1.yaml`
+- `Example/TUM2.yaml`
+- `Example/TUM3.yaml`
+- `Example/ICL.yaml`
+- `Example/TAMU.yaml`
+
+## Notes
+
+- The YOLOv8 TensorRT path expects a COCO-style output layout with bounding box attributes in the first part of the detection vector.
+- Dynamic detection is mainly used for person and other moving objects to reduce tracking drift.
+- If you run on a different CUDA/TensorRT installation, update the include and library paths at the top of `CMakeLists.txt`.
+
+## Troubleshooting
+
+Common issues:
+
+- `TensorRT not found` : verify the TensorRT include and lib directories in `CMakeLists.txt`
+- `engine not found` : ensure `model/yolov8x.engine` exists
+- `class name mismatch` : rebuild or update `model/coco.names` to match the model
+- `CUDA runtime error` : check the GPU driver and TensorRT/CUDA compatibility
+
+## Citation
+
+```bibtex
+@inproceedings{yunus2021manhattanslam,
+    author = {R. Yunus and Y. Li and F. Tombari},
+    title = {ManhattanSLAM: Robust Planar Tracking and Mapping Leveraging Mixture of Manhattan Frames},
+    year = {2021},
+    booktitle = {2021 IEEE International Conference on Robotics and Automation (ICRA)}
+}
+```
